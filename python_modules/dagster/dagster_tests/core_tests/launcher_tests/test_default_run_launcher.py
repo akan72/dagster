@@ -12,7 +12,8 @@ from dagster import (
     DefaultRunLauncher,
     _seven,
     file_relative_path,
-    fs_io_manager,
+    job,
+    op,
     repository,
 )
 from dagster._core.errors import DagsterLaunchFailedError
@@ -25,87 +26,84 @@ from dagster._core.test_utils import (
     poll_for_finished_run,
     poll_for_step_start,
 )
-from dagster._grpc.client import DagsterGrpcClient
-from dagster._grpc.types import CancelExecutionRequest
-from dagster._legacy import ModeDefinition, pipeline, solid
-
-default_mode_def = ModeDefinition(resource_defs={"io_manager": fs_io_manager})
 from dagster._core.workspace.context import WorkspaceProcessContext
 from dagster._core.workspace.load_target import PythonFileTarget
+from dagster._grpc.client import DagsterGrpcClient
+from dagster._grpc.types import CancelExecutionRequest
 
 
-@solid
-def noop_solid(_):
+@op
+def noop_op(_):
     pass
 
 
-@pipeline(mode_defs=[default_mode_def])
+@job
 def noop_pipeline():
     pass
 
 
-@solid
-def crashy_solid(_):
+@op
+def crashy_op(_):
     os._exit(1)  # pylint: disable=W0212
 
 
-@pipeline(mode_defs=[default_mode_def])
+@job
 def crashy_pipeline():
-    crashy_solid()
+    crashy_op()
 
 
-@solid
-def exity_solid(_):
+@op
+def exity_op(_):
     sys.exit(1)  # pylint: disable=W0212
 
 
-@pipeline(mode_defs=[default_mode_def])
+@job
 def exity_pipeline():
-    exity_solid()
+    exity_op()
 
 
-@solid
-def sleepy_solid(_):
+@op
+def sleepy_op(_):
     while True:
         time.sleep(0.1)
 
 
-@pipeline(mode_defs=[default_mode_def])
+@job
 def sleepy_pipeline():
-    sleepy_solid()
+    sleepy_op()
 
 
-@solid
-def slow_solid(_):
+@op
+def slow_op(_):
     time.sleep(4)
 
 
-@pipeline(mode_defs=[default_mode_def])
+@job
 def slow_pipeline():
-    slow_solid()
+    slow_op()
 
 
-@solid
+@op
 def return_one(_):
     return 1
 
 
-@solid
+@op
 def multiply_by_2(_, num):
     return num * 2
 
 
-@solid
+@op
 def multiply_by_3(_, num):
     return num * 3
 
 
-@solid
+@op
 def add(_, num1, num2):
     return num1 + num2
 
 
-@pipeline(mode_defs=[default_mode_def])
+@job
 def math_diamond():
     one = return_one()
     add(multiply_by_2(one), multiply_by_3(one))
@@ -126,12 +124,17 @@ def nope():
 def run_configs():
     return [
         None,
-        {"execution": {"multiprocess": {}}},
+        {"execution": {"config": {"in_process": {}}}},
     ]
 
 
-def _is_multiprocess(run_config):
-    return run_config and "execution" in run_config and "multiprocess" in run_config["execution"]
+def _is_in_process(run_config):
+    return (
+        run_config
+        and "execution" in run_config
+        and "config" in run_config["execution"]
+        and "in_process" in run_config["execution"]["config"]
+    )
 
 
 def _check_event_log_contains(event_log, expected_type_and_message):
@@ -355,8 +358,8 @@ def test_crashy_run(instance, workspace, run_config):  # pylint: disable=redefin
 
     event_records = instance.all_logs(run_id)
 
-    if _is_multiprocess(run_config):
-        message = "Multiprocess executor: child process for step crashy_solid unexpectedly exited"
+    if not _is_in_process(run_config):
+        message = "Multiprocess executor: child process for step crashy_op unexpectedly exited"
     else:
         message = "Run execution process for {run_id} unexpectedly exited".format(run_id=run_id)
 
@@ -398,10 +401,10 @@ def test_exity_run(run_config, instance, workspace):  # pylint: disable=redefine
 
     event_records = instance.all_logs(run_id)
 
-    assert _message_exists(event_records, 'Execution of step "exity_solid" failed.')
+    assert _message_exists(event_records, 'Execution of step "exity_op" failed.')
     assert _message_exists(
         event_records,
-        "Execution of run for \"exity_pipeline\" failed. Steps failed: ['exity_solid']",
+        "Execution of run for \"exity_pipeline\" failed. Steps failed: ['exity_op']",
     )
 
 
@@ -446,7 +449,7 @@ def test_terminated_run(instance, workspace, run_config):  # pylint: disable=red
 
     run_logs = instance.all_logs(run_id)
 
-    if _is_multiprocess(run_config):
+    if not _is_in_process(run_config):
         _check_event_log_contains(
             run_logs,
             [
@@ -459,7 +462,7 @@ def test_terminated_run(instance, workspace, run_config):  # pylint: disable=red
                     "ENGINE_EVENT",
                     "Multiprocess executor: interrupted all active child processes",
                 ),
-                ("STEP_FAILURE", 'Execution of step "sleepy_solid" failed.'),
+                ("STEP_FAILURE", 'Execution of step "sleepy_op" failed.'),
                 (
                     "PIPELINE_CANCELED",
                     'Execution of run for "sleepy_pipeline" canceled.',
@@ -472,7 +475,7 @@ def test_terminated_run(instance, workspace, run_config):  # pylint: disable=red
             run_logs,
             [
                 ("PIPELINE_CANCELING", "Sending run termination request."),
-                ("STEP_FAILURE", 'Execution of step "sleepy_solid" failed.'),
+                ("STEP_FAILURE", 'Execution of step "sleepy_op" failed.'),
                 (
                     "PIPELINE_CANCELED",
                     'Execution of run for "sleepy_pipeline" canceled.',
@@ -589,9 +592,8 @@ def test_single_solid_selection_execution(
         .get_full_external_job("math_diamond")
     )
     pipeline_run = instance.create_run_for_pipeline(
-        pipeline_def=math_diamond,
+        pipeline_def=math_diamond.get_job_def_for_subset_selection(op_selection=["return_one"]),
         run_config=run_config,
-        solids_to_execute={"return_one"},
         external_pipeline_origin=external_pipeline.get_external_origin(),
         pipeline_code_origin=external_pipeline.get_python_origin(),
     )
@@ -627,9 +629,10 @@ def test_multi_solid_selection_execution(
     )
 
     pipeline_run = instance.create_run_for_pipeline(
-        pipeline_def=math_diamond,
+        pipeline_def=math_diamond.get_job_def_for_subset_selection(
+            op_selection=["return_one", "multiply_by_2"]
+        ),
         run_config=run_config,
-        solids_to_execute={"return_one", "multiply_by_2"},
         external_pipeline_origin=external_pipeline.get_external_origin(),
         pipeline_code_origin=external_pipeline.get_python_origin(),
     )
@@ -689,7 +692,7 @@ def test_engine_events(instance, workspace, run_config):  # pylint: disable=rede
 
     engine_events = _get_engine_events(event_records)
 
-    if _is_multiprocess(run_config):
+    if not _is_in_process(run_config):
         messages = [
             "Started process for run",
             "Executing steps using multiprocess executor",
