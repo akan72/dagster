@@ -1,0 +1,40 @@
+# Choosing run isolation in Serverless
+
+Dagster Cloud Serverless offers 2 levels of run isolation: isolated and non-isolated.
+
+## Isolated runs
+
+Isolated runs take place in their own container with their own compute resources: 4 cpu cores and 16Gb of memory.
+
+These runs may take up to 3 minutes to start while these resources are provisioned.
+
+When launching runs manually, select `Isolate run environment` in the Launchpad to launch an isolated runs.
+Scheduled, sensor, and backfill runs are always isolated.
+
+## Non-isolated runs
+
+This can be enabled or disabled in deployment settings with
+
+```yaml
+non_isolated_runs
+  enabled: True
+```
+
+Non-isolated runs provide a faster start time by using a standing container for each code location.
+
+While launching runs from the Launchpad, leave `Isolate run environment` unchecked to launch a non-isolated run.
+Materializing assets from the UI also defaults to non-isolated.
+
+Non-isolated runs have access to fewer compute resources, and they are shared with other processes for a code location
+like sensors. As a result, it's recommended to use isolated runs for compute intensive jobs and materializations.
+
+By default only one non-isolated run will execute at once. While a run is in progress, the the Launchpad will
+swap to only launching isolated runs.
+
+This limit can be configured in deployment settings. Take caution; The limit is in place to help wih avoiding crashes due to OOMs.
+
+```yaml
+non_isolated_runs
+  enabled: True
+  max_concurrent_non_isolated_runs: 1
+```
