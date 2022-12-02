@@ -79,7 +79,6 @@ def make_compute_fn():
     return compute
 
 
-<<<<<<< HEAD
 def _do_construct(ops, dependencies):
     job_def = JobDefinition(
         graph_def=GraphDefinition(name="test", node_defs=ops, dependencies=dependencies)
@@ -87,18 +86,6 @@ def _do_construct(ops, dependencies):
     ops = {s.name: OpNode(name=s.name, definition=s, graph_definition=job_def.graph) for s in ops}
     dependency_structure = DependencyStructure.from_definitions(ops, dependencies)
     return _create_adjacency_lists(list(ops.values()), dependency_structure)
-=======
-def _do_construct(solids, dependencies):
-    pipeline_def = JobDefinition(
-        graph_def=GraphDefinition(name="test", node_defs=solids, dependencies=dependencies)
-    )
-    solids = {
-        s.name: GraphNode(name=s.name, definition=s, graph_definition=pipeline_def.graph)
-        for s in solids
-    }
-    dependency_structure = DependencyStructure.from_definitions(solids, dependencies)
-    return _create_adjacency_lists(list(solids.values()), dependency_structure)
->>>>>>> 57cb7509e2 (update PipelineDefinition invocations)
 
 
 def test_empty_adjacency_lists():
@@ -1230,4 +1217,3 @@ def test_multi_dep_optional():
     result = execute_pipeline(test_other_skip_upstream)
     assert result.success
     assert result.result_for_node("collect_and").skipped
-
