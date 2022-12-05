@@ -3,11 +3,8 @@ import logging  # pylint: disable=unused-import; used by mock in string form
 import re
 import sys
 import time
-from collections import Counter
 from contextlib import ExitStack, contextmanager
-from typing import Optional, Sequence, cast, Tuple, List
-from dagster._utils import Counter, traced_counter
-from dagster._core.execution.results import PipelineExecutionResult
+from typing import List, Optional, Sequence, Tuple, cast
 
 import mock
 import pendulum
@@ -19,17 +16,18 @@ from dagster import (
     AssetObservation,
     DagsterInstance,
     DailyPartitionsDefinition,
+    DynamicPartitionsDefinition,
     EventLogRecord,
     EventRecordsFilter,
     Field,
     In,
     JobDefinition,
+    MultiPartitionsDefinition,
     Out,
     Output,
     RetryRequested,
     RunShardedEventsCursor,
     StaticPartitionsDefinition,
-    MultiPartitionsDefinition,
 )
 from dagster import _check as check
 from dagster import _seven as seven
@@ -51,6 +49,7 @@ from dagster._core.events.log import EventLogEntry, construct_event_logger
 from dagster._core.execution.api import execute_run
 from dagster._core.execution.plan.handle import StepHandle
 from dagster._core.execution.plan.objects import StepFailureData, StepSuccessData
+from dagster._core.execution.results import PipelineExecutionResult
 from dagster._core.execution.stats import StepEventStatus
 from dagster._core.host_representation.origin import (
     ExternalPipelineOrigin,
@@ -71,7 +70,7 @@ from dagster._core.utils import make_new_run_id
 from dagster._legacy import AssetGroup, build_assets_job
 from dagster._loggers import colored_console_logger
 from dagster._serdes import deserialize_json_to_dagster_namedtuple
-from dagster._utils import datetime_as_float
+from dagster._utils import Counter, datetime_as_float, traced_counter
 
 TEST_TIMEOUT = 5
 
@@ -646,6 +645,8 @@ class TestEventLogStorage:
         assert storage.has_secondary_index("_B")
 
     def test_basic_event_store(self, test_run_id, storage):
+        from collections import Counter as CollectionsCounter
+
         if not isinstance(storage, SqlEventLogStorage):
             pytest.skip("This test is for SQL-backed Event Log behavior")
 
@@ -659,9 +660,11 @@ class TestEventLogStorage:
         out_events = list(map(lambda r: deserialize_json_to_dagster_namedtuple(r[0]), rows))
 
         # messages can come out of order
-        event_type_counts = Counter(_event_types(out_events))
+        event_type_counts = CollectionsCounter(_event_types(out_events))
         assert event_type_counts
-        assert Counter(_event_types(out_events)) == Counter(_event_types(events))
+        assert CollectionsCounter(_event_types(out_events)) == CollectionsCounter(
+            _event_types(events)
+        )
 
     def test_basic_get_logs_for_run(self, test_run_id, storage):
 
@@ -2910,12 +2913,13 @@ class TestEventLogStorage:
             assert cached_status.latest_storage_id
             assert cached_status.partitions_def_id
             assert cached_status.serialized_materialized_partition_subset
-            materialized_partition_subset = partitions_def.deserialize_subset(
-                cached_status.serialized_materialized_partition_subset
+            materialized_keys = list(
+                partitions_def.deserialize_subset(
+                    cached_status.serialized_materialized_partition_subset
+                ).get_partition_keys()
             )
-            assert len(materialized_partition_subset.key_ranges) == 1
-            assert materialized_partition_subset.key_ranges[0].start == "2022-02-01"
-            assert materialized_partition_subset.key_ranges[0].end == "2022-02-01"
+            assert len(materialized_keys) == 1
+            assert "2022-02-01" in materialized_keys
             counts = traced_counter.get().counts()
             assert counts.get("DagsterInstance.get_materialization_count_by_partition") == 1
 
@@ -2936,12 +2940,15 @@ class TestEventLogStorage:
             assert cached_status.latest_storage_id
             assert cached_status.partitions_def_id
             assert cached_status.serialized_materialized_partition_subset
-            materialized_partition_subset = partitions_def.deserialize_subset(
-                cached_status.serialized_materialized_partition_subset
+            materialized_keys = list(
+                partitions_def.deserialize_subset(
+                    cached_status.serialized_materialized_partition_subset
+                ).get_partition_keys()
             )
-            assert len(materialized_partition_subset.key_ranges) == 1
-            assert materialized_partition_subset.key_ranges[0].start == "2022-02-01"
-            assert materialized_partition_subset.key_ranges[0].end == "2022-02-02"
+            assert len(materialized_keys) == 2
+            assert all(
+                partition_key in materialized_keys for partition_key in ["2022-02-01", "2022-02-02"]
+            )
             counts = traced_counter.get().counts()
             # Assert that get_materialization_count_by_partition is not called again via cache rebuild
             assert counts.get("DagsterInstance.get_materialization_count_by_partition") == 1
@@ -3088,12 +3095,13 @@ class TestEventLogStorage:
             cached_status = _get_cached_status_for_asset(created_instance, AssetKey("asset1"))
             assert cached_status
             assert cached_status.serialized_materialized_partition_subset
-            materialized_partition_subset = partitions_def.deserialize_subset(
-                cached_status.serialized_materialized_partition_subset
+            materialized_keys = list(
+                partitions_def.deserialize_subset(
+                    cached_status.serialized_materialized_partition_subset
+                ).get_partition_keys()
             )
-            assert len(materialized_partition_subset.key_ranges) == 1
-            assert materialized_partition_subset.key_ranges[0].start == "2022-02-01"
-            assert materialized_partition_subset.key_ranges[0].end == "2022-02-01"
+            assert len(materialized_keys) == 1
+            assert "2022-02-01" in materialized_keys
 
             created_instance.wipe_assets([AssetKey("asset1")])
             assert created_instance.get_asset_records() == []
@@ -3120,3 +3128,36 @@ class TestEventLogStorage:
             )
             assert len(partition_keys) == 1
             assert partition_keys[0] == "2022-10-10"
+
+    def test_dynamic_partitions_status_not_cached(self, storage, instance):
+        dynamic_fn = lambda _current_time: ["a_partition"]
+        dynamic = DynamicPartitionsDefinition(dynamic_fn)
+
+        @asset(partitions_def=dynamic)
+        def asset1():
+            return 1
+
+        asset_graph = AssetGraph.from_assets([asset1])
+        asset_job = define_asset_job("asset_job").resolve([asset1], [])
+
+        with instance_for_test() as created_instance:
+            if not storage._instance:  # pylint: disable=protected-access
+                storage.register_instance(created_instance)
+
+            asset_records = list(created_instance.get_asset_records([AssetKey("asset1")]))
+            assert len(asset_records) == 0
+
+            run_id_1 = make_new_run_id()
+            with create_and_delete_test_runs(instance, [run_id_1]):
+                result = _execute_job_and_store_events(
+                    created_instance,
+                    storage,
+                    asset_job,
+                    run_id=run_id_1,
+                    partition_key="a_partition",
+                )
+                assert result.success
+
+            get_and_update_asset_status_cache_values(created_instance, asset_graph)
+            cached_status = _get_cached_status_for_asset(created_instance, AssetKey("asset1"))
+            assert cached_status.serialized_materialized_partition_subset is None
