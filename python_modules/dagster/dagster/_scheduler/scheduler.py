@@ -141,15 +141,20 @@ def execute_scheduler_iteration_loop(
                 max_tick_retries=max_tick_retries,
                 log_verbose_checks=verbose_logs_iteration,
             )
+            yield
             end_time = pendulum.now("UTC").timestamp()
 
             if verbose_logs_iteration:
                 last_verbose_time = end_time
 
-            loop_duration = end_time - start_time
-            sleep_time = max(0, MIN_INTERVAL_LOOP_TIME - loop_duration)
-            time.sleep(sleep_time)
-            yield
+            # wait until at least the next time that's 0 mod MIN_INTERVAL_LOOP_TIME,
+            # which reduces latency since cron schedules will always happen on that boundary.
+            # if that time has already passed, then go again immediately.
+            next_time = (
+                start_time - (start_time % MIN_INTERVAL_LOOP_TIME)
+            ) + MIN_INTERVAL_LOOP_TIME
+            if next_time > end_time:
+                time.sleep(next_time - end_time)
 
 
 def launch_scheduled_runs(
