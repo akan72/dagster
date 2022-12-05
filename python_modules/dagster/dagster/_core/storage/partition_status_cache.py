@@ -38,7 +38,7 @@ class AssetStatusCacheValue(
         partitions_def_id (Optional(str)): The serializable unique identifier for the partitions
             definition. When this value differs from the new partitions definition, this cache
             value needs to be recalculated. None if the asset is unpartitioned.
-        materialized_partition_subsets (Optional(str)): The serializable representation of the
+        materialized_partition_subsets (Optional(str)): The serialized representation of the
             materialized partition subsets, up to the latest storage id. None if the asset is
             unpartitioned.
     """
