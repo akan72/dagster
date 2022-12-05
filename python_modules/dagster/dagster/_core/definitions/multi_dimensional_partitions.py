@@ -1,7 +1,7 @@
 import itertools
 import json
 from datetime import datetime
-from typing import Dict, Iterable, List, Mapping, NamedTuple, Optional, Sequence, Tuple
+from typing import Dict, List, Mapping, NamedTuple, Optional, Sequence, Tuple
 
 import dagster._check as check
 from dagster._annotations import experimental
@@ -262,8 +262,12 @@ class MultiPartitionsDefinition(PartitionsDefinition):
 class MultiPartitionsSubset(DefaultPartitionsSubset):
     @staticmethod
     def from_serialized(
-        partitions_def: "MultiPartitionsDefinition", serialized: str
+        partitions_def: PartitionsDefinition, serialized: str
     ) -> "MultiPartitionsSubset":
+        if not isinstance(partitions_def, MultiPartitionsDefinition):
+            check.failed(
+                "Must pass a MultiPartitionsDefinition object to deserialize MultiPartitionsSubset."
+            )
         return MultiPartitionsSubset(
             subset=set(
                 [

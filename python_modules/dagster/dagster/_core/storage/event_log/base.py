@@ -5,7 +5,6 @@ from typing import (
     TYPE_CHECKING,
     Callable,
     Iterable,
-    List,
     Mapping,
     NamedTuple,
     Optional,
@@ -13,7 +12,6 @@ from typing import (
     Set,
     Union,
 )
-from typing import Callable, Iterable, Mapping, NamedTuple, Optional, Sequence, Set, Union
 
 import dagster._check as check
 from dagster._core.assets import AssetDetails

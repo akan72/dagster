@@ -1,5 +1,4 @@
-from collections import defaultdict
-from typing import List, Mapping, NamedTuple, Optional
+from typing import List, Mapping, NamedTuple, Optional, Sequence, Union
 
 from dagster import AssetKey, DagsterEventType, DagsterInstance, EventRecordsFilter
 from dagster import _check as check
@@ -7,7 +6,6 @@ from dagster._core.definitions.asset_graph import AssetGraph
 from dagster._core.definitions.multi_dimensional_partitions import (
     MultiPartitionKey,
     MultiPartitionsDefinition,
-    get_multipartition_key_from_tags,
 )
 from dagster._core.definitions.partition import PartitionsDefinition, PartitionsSubset
 from dagster._core.storage.tags import (
@@ -24,7 +22,7 @@ class AssetStatusCacheValue(
         [
             ("latest_storage_id", int),
             ("partitions_def_id", Optional[str]),
-            ("materialized_partition_subsets", Optional[str]),
+            ("serialized_materialized_partition_subset", Optional[str]),
             # Future partition subset features will go here, e.g. stale partition subsets
         ],
     )
@@ -38,7 +36,7 @@ class AssetStatusCacheValue(
         partitions_def_id (Optional(str)): The serializable unique identifier for the partitions
             definition. When this value differs from the new partitions definition, this cache
             value needs to be recalculated. None if the asset is unpartitioned.
-        materialized_partition_subsets (Optional(str)): The serialized representation of the
+        serialized_materialized_partition_subset (Optional(str)): The serialized representation of the
             materialized partition subsets, up to the latest storage id. None if the asset is
             unpartitioned.
     """
@@ -47,17 +45,17 @@ class AssetStatusCacheValue(
         cls,
         latest_storage_id: int,
         partitions_def_id: Optional[str] = None,
-        materialized_partition_subsets: Optional[str] = None,
+        serialized_materialized_partition_subset: Optional[str] = None,
     ):
         check.int_param(latest_storage_id, "latest_storage_id")
         check.opt_inst_param(
-            materialized_partition_subsets,
-            "materialized_partition_subsets",
+            serialized_materialized_partition_subset,
+            "serialized_materialized_partition_subset",
             str,
         )
         check.opt_str_param(partitions_def_id, "partitions_def_id")
         return super(AssetStatusCacheValue, cls).__new__(
-            cls, latest_storage_id, partitions_def_id, materialized_partition_subsets
+            cls, latest_storage_id, partitions_def_id, serialized_materialized_partition_subset
         )
 
     @staticmethod
@@ -74,15 +72,15 @@ class AssetStatusCacheValue(
     def deserialize_materialized_partition_subsets(
         self, partitions_def: PartitionsDefinition
     ) -> PartitionsSubset:
-        if not self.materialized_partition_subsets:
+        if not self.serialized_materialized_partition_subset:
             return partitions_def.empty_subset()
 
-        return partitions_def.deserialize_subset(self.materialized_partition_subsets)
+        return partitions_def.deserialize_subset(self.serialized_materialized_partition_subset)
 
 
-def get_materialized_multipartitions_from_tags(
+def get_materialized_multipartitions(
     instance: DagsterInstance, asset_key: AssetKey, partitions_def: MultiPartitionsDefinition
-) -> List[MultiPartitionKey]:
+) -> Sequence[MultiPartitionKey]:
     dimension_names = partitions_def.partition_dimension_names
     materialized_keys: List[MultiPartitionKey] = []
     for event_tags in instance.get_event_tags_for_asset(asset_key):
@@ -93,10 +91,8 @@ def get_materialized_multipartitions_from_tags(
         }
 
         if all(
-            [
-                dimension_name in event_partition_keys_by_dimension.keys()
-                for dimension_name in dimension_names
-            ]
+            dimension_name in event_partition_keys_by_dimension.keys()
+            for dimension_name in dimension_names
         ):
             materialized_keys.append(
                 MultiPartitionKey(
@@ -109,12 +105,12 @@ def get_materialized_multipartitions_from_tags(
     return materialized_keys
 
 
-def _rebuild_status_cache(
+def _build_status_cache(
     instance: DagsterInstance,
     asset_key: AssetKey,
     latest_storage_id: int,
-    partitions_def: Optional[PartitionsDefinition] = None,
-):
+    partitions_def: Optional[PartitionsDefinition],
+) -> AssetStatusCacheValue:
     """
     This method refreshes the asset status cache for a given asset key. It recalculates
     the materialized partition subset for the asset key and updates the cache value.
@@ -122,10 +118,9 @@ def _rebuild_status_cache(
     if not partitions_def:
         return AssetStatusCacheValue(latest_storage_id=latest_storage_id)
 
+    materialized_keys: Sequence[Union[str, MultiPartitionKey]]
     if isinstance(partitions_def, MultiPartitionsDefinition):
-        materialized_keys = get_materialized_multipartitions_from_tags(
-            instance, asset_key, partitions_def
-        )
+        materialized_keys = get_materialized_multipartitions(instance, asset_key, partitions_def)
     else:
         materialized_keys = [
             key
@@ -135,18 +130,19 @@ def _rebuild_status_cache(
             if count > 0
         ]
 
-    materialized_partition_subsets = partitions_def.empty_subset()
+    serialized_materialized_partition_subset = partitions_def.empty_subset()
     partition_keys = partitions_def.get_partition_keys()
-    materialized_keys = set(materialized_keys) & set(partition_keys)
 
-    materialized_partition_subsets = materialized_partition_subsets.with_partition_keys(
-        materialized_keys
+    serialized_materialized_partition_subset = (
+        serialized_materialized_partition_subset.with_partition_keys(
+            set(materialized_keys) & set(partition_keys)
+        )
     )
 
     return AssetStatusCacheValue(
         latest_storage_id=latest_storage_id,
         partitions_def_id=partitions_def.serializable_unique_identifier,
-        materialized_partition_subsets=materialized_partition_subsets.serialize(),
+        serialized_materialized_partition_subset=serialized_materialized_partition_subset.serialize(),
     )
 
 
@@ -154,8 +150,8 @@ def _get_updated_status_cache(
     instance: DagsterInstance,
     asset_key: AssetKey,
     current_status_cache_value: AssetStatusCacheValue,
-    partitions_def: Optional[PartitionsDefinition] = None,
-):
+    partitions_def: Optional[PartitionsDefinition],
+) -> AssetStatusCacheValue:
     """
     This method accepts the current asset status cache value, and fetches unevaluated
     records from the event log. It then updates the cache value with the new materializations.
@@ -182,8 +178,11 @@ def _get_updated_status_cache(
         == partitions_def.serializable_unique_identifier
     )
     materialized_subset: PartitionsSubset = (
-        partitions_def.deserialize_subset(current_status_cache_value.materialized_partition_subsets)
-        if current_status_cache_value and current_status_cache_value.materialized_partition_subsets
+        partitions_def.deserialize_subset(
+            current_status_cache_value.serialized_materialized_partition_subset
+        )
+        if current_status_cache_value
+        and current_status_cache_value.serialized_materialized_partition_subset
         else partitions_def.empty_subset()
     )
     newly_materialized_partitions = set()
@@ -194,14 +193,15 @@ def _get_updated_status_cache(
             and unevaluated_materializations.event_log_entry.dagster_event.is_step_materialization
         ):
             check.failed("Expected materialization event")
-        newly_materialized_partitions.add(
-            unevaluated_materializations.event_log_entry.dagster_event.partition
-        )
+        if unevaluated_materializations.event_log_entry.dagster_event.partition:
+            newly_materialized_partitions.add(
+                unevaluated_materializations.event_log_entry.dagster_event.partition
+            )
     materialized_subset = materialized_subset.with_partition_keys(newly_materialized_partitions)
     return AssetStatusCacheValue(
         latest_storage_id=latest_storage_id,
         partitions_def_id=current_status_cache_value.partitions_def_id,
-        materialized_partition_subsets=materialized_subset.serialize(),
+        serialized_materialized_partition_subset=materialized_subset.serialize(),
     )
 
 
@@ -244,7 +244,7 @@ def _get_fresh_asset_status_cache_values(
                 limit=1,
             )
             if event_records:
-                updated_cache_values_by_asset_key[asset_key] = _rebuild_status_cache(
+                updated_cache_values_by_asset_key[asset_key] = _build_status_cache(
                     instance=instance,
                     asset_key=asset_key,
                     partitions_def=partitions_def,
@@ -261,7 +261,7 @@ def _get_fresh_asset_status_cache_values(
     return updated_cache_values_by_asset_key
 
 
-def update_asset_status_cache_values(
+def get_and_update_asset_status_cache_values(
     instance: DagsterInstance, asset_graph: AssetGraph, asset_key: Optional[AssetKey] = None
 ) -> Mapping[AssetKey, AssetStatusCacheValue]:
     updated_cache_values_by_asset_key = _get_fresh_asset_status_cache_values(

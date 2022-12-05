@@ -21,17 +21,16 @@ from dagster import (
     EventRecordsFilter,
     Field,
     In,
+    JobDefinition,
     Out,
     Output,
     RetryRequested,
     RunShardedEventsCursor,
     StaticPartitionsDefinition,
-    JobDefinition,
 )
 from dagster import _check as check
 from dagster import _seven as seven
-from dagster import asset, define_asset_job, op, resource
-from dagster import asset, in_process_executor, job, op, resource
+from dagster import asset, define_asset_job, in_process_executor, job, op, resource
 from dagster._core.assets import AssetDetails
 from dagster._core.definitions import ExpectationResult
 from dagster._core.definitions.asset_graph import AssetGraph
@@ -55,14 +54,14 @@ from dagster._core.host_representation.origin import (
     ExternalRepositoryOrigin,
     InProcessRepositoryLocationOrigin,
 )
-from dagster._core.storage.event_log.base import EventLogStorage
 from dagster._core.storage.event_log import InMemoryEventLogStorage, SqlEventLogStorage
+from dagster._core.storage.event_log.base import EventLogStorage
 from dagster._core.storage.event_log.migration import (
     EVENT_LOG_DATA_MIGRATIONS,
     migrate_asset_key_data,
 )
 from dagster._core.storage.event_log.sqlite.sqlite_event_log import SqliteEventLogStorage
-from dagster._core.storage.partition_status_cache import update_asset_status_cache_values
+from dagster._core.storage.partition_status_cache import get_and_update_asset_status_cache_values
 from dagster._core.test_utils import create_run_for_test, instance_for_test
 from dagster._core.types.loadable_target_origin import LoadableTargetOrigin
 from dagster._core.utils import make_new_run_id
@@ -2836,7 +2835,7 @@ class TestEventLogStorage:
                 )
                 assert result.success
 
-            update_asset_status_cache_values(created_instance, asset_graph)
+            get_and_update_asset_status_cache_values(created_instance, asset_graph)
             asset_records = list(created_instance.get_asset_records([AssetKey("asset1")]))
             assert len(asset_records) == 1
             cached_status = asset_records[0].asset_entry.cached_status
@@ -2851,7 +2850,7 @@ class TestEventLogStorage:
             assert cached_status.partitions_def_id
 
             static_partitions_def = StaticPartitionsDefinition(["a", "b", "c"])
-            asset1._partitions_def = static_partitions_def
+            asset1._partitions_def = static_partitions_def  # pylint: disable=protected-access
             asset_job = define_asset_job("asset_job").resolve([asset1], [])
             asset_graph = AssetGraph.from_assets([asset1])
             run_id_2 = make_new_run_id()
@@ -2864,7 +2863,7 @@ class TestEventLogStorage:
                     partition_key="a",
                 )
                 assert result.success
-            update_asset_status_cache_values(created_instance, asset_graph)
+            get_and_update_asset_status_cache_values(created_instance, asset_graph)
 
             asset_records = list(created_instance.get_asset_records([AssetKey("asset1")]))
             assert len(asset_records) == 1
