@@ -1521,47 +1521,39 @@ class SqlEventLogStorage(EventLogStorage):
 
         return event_or_materialization.dagster_event.step_materialization_data.materialization
 
+    def _get_asset_key_values_on_wipe(self):
+        wipe_timestamp = pendulum.now("UTC").timestamp()
+        values = {
+            "asset_details": serialize_dagster_namedtuple(
+                AssetDetails(last_wipe_timestamp=wipe_timestamp)
+            ),
+            "last_run_id": None,
+        }
+        if self.has_asset_key_index_cols():
+            values.update(
+                dict(
+                    wipe_timestamp=utc_datetime_from_timestamp(wipe_timestamp),
+                )
+            )
+        if self.has_asset_key_col("cached_status_data"):
+            values.update(dict(cached_status_data=None))
+        return values
+
     def wipe_asset(self, asset_key):
         check.inst_param(asset_key, "asset_key", AssetKey)
+        wiped_values = self._get_asset_key_values_on_wipe()
 
-        wipe_timestamp = pendulum.now("UTC").timestamp()
-
-        if self.has_asset_key_index_cols():
-            with self.index_connection() as conn:
-                conn.execute(
-                    AssetKeyTable.update()  # pylint: disable=no-value-for-parameter
-                    .where(
-                        db.or_(
-                            AssetKeyTable.c.asset_key == asset_key.to_string(),
-                            AssetKeyTable.c.asset_key == asset_key.to_string(legacy=True),
-                        )
-                    )
-                    .values(
-                        asset_details=serialize_dagster_namedtuple(
-                            AssetDetails(last_wipe_timestamp=wipe_timestamp)
-                        ),
-                        wipe_timestamp=utc_datetime_from_timestamp(wipe_timestamp),
-                        last_run_id=None,
+        with self.index_connection() as conn:
+            conn.execute(
+                AssetKeyTable.update()  # pylint: disable=no-value-for-parameter
+                .values(**wiped_values)
+                .where(
+                    db.or_(
+                        AssetKeyTable.c.asset_key == asset_key.to_string(),
+                        AssetKeyTable.c.asset_key == asset_key.to_string(legacy=True),
                     )
                 )
-
-        else:
-            with self.index_connection() as conn:
-                conn.execute(
-                    AssetKeyTable.update()  # pylint: disable=no-value-for-parameter
-                    .where(
-                        db.or_(
-                            AssetKeyTable.c.asset_key == asset_key.to_string(),
-                            AssetKeyTable.c.asset_key == asset_key.to_string(legacy=True),
-                        )
-                    )
-                    .values(
-                        asset_details=serialize_dagster_namedtuple(
-                            AssetDetails(last_wipe_timestamp=wipe_timestamp)
-                        ),
-                        last_run_id=None,
-                    )
-                )
+            )
 
     def get_materialization_count_by_partition(
         self, asset_keys: Sequence[AssetKey]
